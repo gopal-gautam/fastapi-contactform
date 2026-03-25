@@ -2,7 +2,10 @@ from fastapi import FastAPI, Request, HTTPException
 from pydantic import BaseModel, EmailStr, Field
 import os
 import requests
+from dotenv import load_dotenv
 from mail_services import MailService, MailServiceError, get_mail_service, validate_mail_service_config
+
+load_dotenv()
 
 app = FastAPI()
 
