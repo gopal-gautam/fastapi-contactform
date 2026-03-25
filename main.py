@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Request, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
 import os
 import requests
@@ -10,7 +11,25 @@ load_dotenv()
 app = FastAPI()
 
 TURNSTILE_SECRET = os.getenv("TURNSTILE_SECRET", "")
+CORS_ALLOWED_ORIGINS = os.getenv("CORS_ALLOWED_ORIGINS", "")
 mail_service: MailService | None = None
+
+
+def _parse_allowed_origins(origins: str) -> list[str]:
+    values = [origin.strip() for origin in origins.split(",") if origin.strip()]
+    return values
+
+
+allowed_origins = _parse_allowed_origins(CORS_ALLOWED_ORIGINS)
+
+if allowed_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins,
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 class ContactForm(BaseModel):
     name: str = Field(..., min_length=2, max_length=100)
