@@ -1,7 +1,18 @@
 import os
 from abc import ABC, abstractmethod
+import logging
+from typing import Any
 
 import requests
+
+
+logger = logging.getLogger("contact-backend.mail")
+
+
+def _response_text_preview(text: str, limit: int = 1200) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "...<truncated>"
 
 
 class MailServiceError(Exception):
@@ -51,9 +62,25 @@ class SendGridMailService(MailService):
             ],
         }
 
-        resp = requests.post(url, headers=headers, json=payload, timeout=10)
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=10)
+        except requests.RequestException as exc:
+            logger.exception("SendGrid request failed")
+            raise MailServiceError(f"SendGrid request failed: {exc}") from exc
+
+        logger.info(
+            "SendGrid response received",
+            extra={"status_code": resp.status_code, "to_email": self.to_email},
+        )
+        if resp.text:
+            logger.info("SendGrid response body: %s", _response_text_preview(resp.text))
+
         if resp.status_code >= 300:
             raise MailServiceError(f"SendGrid error: {resp.status_code} {resp.text}")
+
+        message_id = resp.headers.get("X-Message-Id")
+        if message_id:
+            logger.info("SendGrid message accepted", extra={"message_id": message_id})
 
 
 class MailjetMailService(MailService):
@@ -85,9 +112,25 @@ class MailjetMailService(MailService):
             ]
         }
 
-        resp = requests.post(url, auth=(self.api_key, self.api_secret), json=payload, timeout=10)
+        try:
+            resp = requests.post(url, auth=(self.api_key, self.api_secret), json=payload, timeout=10)
+        except requests.RequestException as exc:
+            logger.exception("Mailjet request failed")
+            raise MailServiceError(f"Mailjet request failed: {exc}") from exc
+
+        logger.info(
+            "Mailjet response received",
+            extra={"status_code": resp.status_code, "to_email": self.to_email},
+        )
+        if resp.text:
+            logger.info("Mailjet response body: %s", _response_text_preview(resp.text))
+
         if resp.status_code >= 300:
             raise MailServiceError(f"Mailjet error: {resp.status_code} {resp.text}")
+
+        message_id = _extract_mailjet_message_id(resp)
+        if message_id:
+            logger.info("Mailjet message accepted", extra={"message_id": message_id})
 
 
 def validate_mail_service_config() -> None:
@@ -132,3 +175,32 @@ def get_mail_service() -> MailService:
         )
 
     raise MailServiceError(f"Unsupported MAIL_PROVIDER: {provider}")
+
+
+def _extract_mailjet_message_id(resp: requests.Response) -> str | None:
+    try:
+        payload: dict[str, Any] = resp.json()
+    except ValueError:
+        return None
+
+    messages = payload.get("Messages")
+    if not isinstance(messages, list) or not messages:
+        return None
+
+    first = messages[0]
+    if not isinstance(first, dict):
+        return None
+
+    message_uuid = first.get("To")
+    if not isinstance(message_uuid, list) or not message_uuid:
+        return None
+
+    first_to = message_uuid[0]
+    if not isinstance(first_to, dict):
+        return None
+
+    message_id = first_to.get("MessageID")
+    if message_id is None:
+        return None
+
+    return str(message_id)

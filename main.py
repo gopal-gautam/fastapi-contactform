@@ -1,12 +1,19 @@
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
+import logging
 import os
 import requests
 from dotenv import load_dotenv
 from mail_services import MailService, MailServiceError, get_mail_service, validate_mail_service_config
 
 load_dotenv()
+
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
+logger = logging.getLogger("contact-backend")
 
 app = FastAPI()
 
@@ -49,6 +56,15 @@ def verify_turnstile(token: str, remoteip: str | None = None) -> bool:
         timeout=10,
     )
     data = resp.json()
+    if not data.get("success", False):
+        logger.warning(
+            "Turnstile verification failed",
+            extra={
+                "remote_ip": remoteip,
+                "error_codes": data.get("error-codes", []),
+                "status_code": resp.status_code,
+            },
+        )
     return data.get("success", False)
 
 
@@ -71,15 +87,29 @@ async def startup_event() -> None:
     try:
         validate_app_config()
         mail_service = get_mail_service()
+        logger.info("Application startup validation completed")
     except MailServiceError as exc:
+        logger.exception("Mail service configuration validation failed")
         raise RuntimeError(f"Invalid mail service configuration: {exc}") from exc
+    except RuntimeError:
+        logger.exception("Application configuration validation failed")
+        raise
 
 @app.post("/contact")
 async def contact(form: ContactForm, request: Request):
     if mail_service is None:
+        logger.error("Mail service is not initialized")
         raise HTTPException(status_code=500, detail="Mail service is not initialized")
 
     client_ip = request.client.host if request.client else None
+    logger.info(
+        "Received contact form submission",
+        extra={
+            "client_ip": client_ip,
+            "sender_email": str(form.email),
+            "subject": form.subject,
+        },
+    )
 
     if not verify_turnstile(form.turnstileToken, client_ip):
         raise HTTPException(status_code=400, detail="Bot verification failed")
@@ -91,7 +121,15 @@ async def contact(form: ContactForm, request: Request):
             subject=form.subject,
             message=form.message,
         )
+        logger.info(
+            "Mail provider accepted contact email",
+            extra={"sender_email": str(form.email), "subject": form.subject},
+        )
     except MailServiceError:
+        logger.exception(
+            "Mail provider failed to send contact email",
+            extra={"sender_email": str(form.email), "subject": form.subject},
+        )
         raise HTTPException(status_code=500, detail="Failed to send email")
 
     return {"success": True}
